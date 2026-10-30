@@ -1,9 +1,11 @@
 // ==UserScript==
-// @name         Карточка сотрудника Smartway
+// @name         Буфер обмена
 // @namespace    https://smartway.today/
-// @version      2.3
-// @description  Извлекает данные сотрудника и формирует карточку (Стандартная / ЖД / Страховка) + Форматирование
-// @match        https://bo.sandbox.smartway.today/*
-// @match        https://bo.smartway.today/*
-// @grant        none
+// @version      3.1
+// @description  Постоянный светлый виджет "Буфер обмена" + автоформатирование даты и паспорта
+// @match        https://*/*
+// @match        http://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
 // ==/UserScript==
