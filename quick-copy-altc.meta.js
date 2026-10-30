@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Quick Copy Alt+C
 // @namespace    https://smartway.today/
-// @version      2.0
-// @description  Постоянный виджет с выделенным текстом + история копирований
+// @version      2.1
+// @description  Постоянный светлый виджет "Буфер" + история копирований
 // @match        https://*/*
 // @match        http://*/*
 // @grant        GM_setValue
