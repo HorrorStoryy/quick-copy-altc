@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Quick Copy Alt+C
 // @namespace    https://smartway.today/
-// @version      1.0
-// @description  Быстрое копирование выделенного текста по Alt+C с историей
+// @version      2.0
+// @description  Постоянный виджет с выделенным текстом + история копирований
 // @author       Smartway
 // @match        https://*/*
 // @match        http://*/*
@@ -24,7 +24,9 @@
     var ICON_CLOSE = '\u2715';
     var ICON_TRASH = '\uD83D\uDDD1';
 
+    var REFERENCE_KEY = 'quickCopyReference';
     var HISTORY_KEY = 'quickCopyHistory';
+    var WIDGET_VISIBLE_KEY = 'quickCopyWidgetVisible';
     var MAX_HISTORY = 50;
 
     // ===== УВЕДОМЛЕНИЕ =====
@@ -79,7 +81,7 @@
         return div.innerHTML;
     }
 
-    // ===== КОПИРОВАНИЕ =====
+    // ===== КОПИРОВАНИЕ В БУФЕР =====
     function copyToClipboard(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             return navigator.clipboard.writeText(text);
@@ -129,6 +131,67 @@
         showNotification(ICON_TRASH, 'История очищена');
     }
 
+    // ===== ПОСТОЯННЫЙ ВИДЖЕТ "СПРАВКА КЛИЕНТА" =====
+    function updateFloatingWidget(text, isVisible) {
+        var widgetRoot = document.getElementById('quick-copy-widget-root');
+        
+        // Если текст пустой или виджет скрыт — удаляем
+        if (!text || isVisible === false) {
+            if (widgetRoot) widgetRoot.remove();
+            return;
+        }
+
+        // Если виджет уже есть — просто обновляем текст
+        if (widgetRoot) {
+            var textElement = widgetRoot.shadowRoot.getElementById('widget-text');
+            if (textElement) {
+                textElement.textContent = text;
+            }
+            return;
+        }
+
+        // Создаём виджет с нуля
+        widgetRoot = document.createElement('div');
+        widgetRoot.id = 'quick-copy-widget-root';
+        document.body.appendChild(widgetRoot);
+
+        var shadow = widgetRoot.attachShadow({ mode: 'open' });
+
+        var style = document.createElement('style');
+        style.textContent =
+            '.info-card {' +
+            '  position: fixed; bottom: 20px; right: 20px; width: 360px;' +
+            '  background: #0f172a; color: #f8fafc; padding: 16px; border-radius: 14px;' +
+            '  box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); z-index: 2147483647;' +
+            '  font-family: system-ui, -apple-system, sans-serif; border: 1px solid #334155;' +
+            '}' +
+            '.header { font-weight: 800; margin-bottom: 10px; color: #38bdf8; display: flex; justify-content: space-between; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }' +
+            '.content {' +
+            '  font-family: "JetBrains Mono", "Fira Code", monospace;' +
+            '  background: #000000; padding: 12px; border-radius: 8px;' +
+            '  max-height: 200px; overflow-y: auto; white-space: pre-wrap;' +
+            '  font-size: 14px; color: #ffffff; border: 1px solid #1e293b; line-height: 1.6;' +
+            '}' +
+            '.close { cursor: pointer; opacity: 0.6; font-size: 18px; line-height: 1; padding: 0 5px; }' +
+            '.close:hover { opacity: 1; color: #ef4444; }';
+
+        var container = document.createElement('div');
+        container.className = 'info-card';
+        container.innerHTML = '<div class="header"><span>Справка клиента</span><span class="close" id="close-widget">' + ICON_CLOSE + '</span></div><div class="content" id="widget-text"></div>';
+
+        shadow.appendChild(style);
+        shadow.appendChild(container);
+
+        shadow.getElementById('close-widget').onclick = function() {
+            GM_setValue(WIDGET_VISIBLE_KEY, false);
+        };
+
+        var textElement = shadow.getElementById('widget-text');
+        if (textElement) {
+            textElement.textContent = text;
+        }
+    }
+
     // ===== ПАНЕЛЬ ИСТОРИИ =====
     function showHistoryPanel() {
         var existing = document.getElementById('quick-copy-history-panel');
@@ -176,14 +239,14 @@
                         '<span>' + item.length + ' симв.</span>' +
                         '</div>' +
                         '<div style="font-size:13px;color:#1f2937;white-space:pre-wrap;word-break:break-word;line-height:1.4;">' + escapeHtml(preview) + '</div>' +
-                        '<div style="font-size:11px;color:#3b82f6;margin-top:6px;font-weight:600;">' + ICON_COPY + ' Нажмите, чтобы скопировать</div>';
+                        '<div style="font-size:11px;color:#3b82f6;margin-top:6px;font-weight:600;">' + ICON_COPY + ' Нажмите, чтобы сделать текущей</div>';
 
                     entry.onclick = function() {
-                        copyToClipboard(item.text).then(function() {
-                            showNotification(ICON_CHECK, 'Скопировано из истории');
-                        }).catch(function() {
-                            showError('Не удалось скопировать');
-                        });
+                        // Делаем запись текущей — отображаем в постоянном виджете
+                        GM_setValue(REFERENCE_KEY, item.text);
+                        GM_setValue(WIDGET_VISIBLE_KEY, true);
+                        updateFloatingWidget(item.text, true);
+                        showNotification(ICON_CHECK, 'Запись из истории активирована');
                     };
 
                     content.appendChild(entry);
@@ -221,7 +284,7 @@
         document.addEventListener('mouseup', function() { isDragging = false; });
     }
 
-    // ===== ГЛАВНАЯ ФУНКЦИЯ КОПИРОВАНИЯ =====
+    // ===== ГЛАВНАЯ ФУНКЦИЯ: Alt+C =====
     function doQuickCopy() {
         var selection = window.getSelection().toString().trim();
         if (!selection) {
@@ -229,20 +292,42 @@
             return;
         }
 
-        copyToClipboard(selection).then(function() {
-            saveToHistory(selection);
-            var preview = selection.length > 60 ? selection.substring(0, 60) + '...' : selection;
-            showNotification(ICON_CHECK, 'Скопировано: ' + preview);
-            console.log('[QuickCopy] Скопировано ' + selection.length + ' символов');
-        }).catch(function(err) {
-            console.error('[QuickCopy] Ошибка:', err);
-            showError('Не удалось скопировать');
+        // Сохраняем как текущую запись
+        GM_setValue(REFERENCE_KEY, selection);
+        GM_setValue(WIDGET_VISIBLE_KEY, true);
+
+        // Добавляем в историю
+        saveToHistory(selection);
+
+        // Показываем постоянный виджет
+        updateFloatingWidget(selection, true);
+
+        showNotification(ICON_CHECK, 'Сохранено: ' + selection.substring(0, 60) + (selection.length > 60 ? '...' : ''));
+        console.log('[QuickCopy] Сохранено ' + selection.length + ' символов');
+    }
+
+    // ===== ИНИЦИАЛИЗАЦИЯ =====
+    var savedData = GM_getValue(REFERENCE_KEY, '');
+    var savedVisible = GM_getValue(WIDGET_VISIBLE_KEY, true);
+    if (savedData && savedVisible) {
+        updateFloatingWidget(savedData, true);
+    }
+
+    // Синхронизация между вкладками
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(REFERENCE_KEY, function(name, old_value, new_value, remote) {
+            var visible = GM_getValue(WIDGET_VISIBLE_KEY, true);
+            updateFloatingWidget(new_value, visible);
+        });
+        GM_addValueChangeListener(WIDGET_VISIBLE_KEY, function(name, old_value, new_value, remote) {
+            var data = GM_getValue(REFERENCE_KEY, '');
+            if (data) updateFloatingWidget(data, new_value);
         });
     }
 
     // ===== ГОРЯЧИЕ КЛАВИШИ =====
     document.addEventListener('keydown', function(e) {
-        // Alt+C — копировать выделенное
+        // Alt+C — сохранить выделенное и показать виджет
         if (e.altKey && e.code === 'KeyC') {
             e.preventDefault();
             e.stopPropagation();
@@ -265,6 +350,6 @@
         }
     }, true);
 
-    console.log('[Quick Copy Alt+C] Загружен. Горячие клавиши: Alt+C (копировать), Alt+V (история)');
+    console.log('[Quick Copy Alt+C v2.0] Загружен. Горячие клавиши: Alt+C (сохранить), Alt+V (история)');
 
 })();
