@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Карточка сотрудника Smartway
+// @name         Буфер обмена
 // @namespace    https://smartway.today/
 // @version      2.2
 // @description  Извлекает данные сотрудника и формирует карточку (Стандартная / ЖД / Страховка)
