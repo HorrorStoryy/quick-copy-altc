@@ -1,517 +1,310 @@
 // ==UserScript==
-// @name         Карточка сотрудника Smartway
+// @name         Буфер обмена
 // @namespace    https://smartway.today/
-// @version      2.3
-// @description  Извлекает данные сотрудника и формирует карточку (Стандартная / ЖД / Страховка) + Форматирование
+// @version      3.1
+// @description  Постоянный светлый виджет "Буфер обмена" + автоформатирование даты и паспорта
 // @author       Smartway
-// @match        https://bo.sandbox.smartway.today/*
-// @match        https://bo.smartway.today/*
-// @grant        none
+// @match        https://*/*
+// @match        http://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
 // @run-at       document-idle
-// @updateURL    https://raw.githubusercontent.com/HorrorStoryy/smartway-card/main/smartway-card.meta.js
-// @downloadURL  https://raw.githubusercontent.com/HorrorStoryy/smartway-card/main/smartway-card.user.js
+// @updateURL    https://raw.githubusercontent.com/HorrorStoryy/quick-copy-altc/main/quick-copy-altc.meta.js
+// @downloadURL  https://raw.githubusercontent.com/HorrorStoryy/quick-copy-altc/main/quick-copy-altc.user.js
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    let cachedData = null;
-    let lastCardText = '';
+    const ICON_COPY = '\uD83D\uDCCB';
+    const ICON_CHECK = '\u2705';
+    const ICON_HISTORY = '\uD83D\uDCDC';
+    const ICON_CLOSE = '\u2715';
+    const ICON_TRASH = '\uD83D\uDDD1';
 
-    // ---------- КНОПКА-ТРИГГЕР ----------
-    function createToggleButton() {
-        const oldBtn = document.getElementById('smartway-toggle');
-        if (oldBtn) oldBtn.remove();
-        const toggle = document.createElement('button');
-        toggle.id = 'smartway-toggle';
-        toggle.textContent = '📋';
-        toggle.title = 'Карточка сотрудника (Ctrl+1/2/3)';
-        toggle.style.cssText = `position: fixed; top: 100px; right: 20px; z-index: 999999; background: #4CAF50; color: white; border: none; border-radius: 50%; width: 50px; height: 50px; font-size: 24px; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,0.3); transition: 0.2s; display: flex; align-items: center; justify-content: center; opacity: 0.8;`;
-        toggle.onmouseover = () => { toggle.style.opacity = '1'; toggle.style.transform = 'scale(1.05)'; };
-        toggle.onmouseout = () => { toggle.style.opacity = '0.8'; toggle.style.transform = 'scale(1)'; };
-        toggle.onclick = () => {
-            let panel = document.getElementById('smartway-panel');
-            if (panel) {
-                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-                if (panel.style.display === 'block' && !cachedData) {
-                    cachedData = parsePageData();
-                }
-            } else {
-                createPanel();
-            }
+    const REFERENCE_KEY = 'quickCopyReference';
+    const HISTORY_KEY = 'quickCopyHistory';
+    const WIDGET_VISIBLE_KEY = 'quickCopyWidgetVisible';
+    const MAX_HISTORY = 50;
+
+    // ===== АВТОФОРМАТИРОВАНИЕ ТЕКСТА =====
+    function formatCopiedText(text) {
+        let result = text;
+        const months = {
+            'янв':'01','фев':'02','мар':'03','апр':'04','мая':'05','май':'05',
+            'июн':'06','июл':'07','авг':'08','сен':'09','окт':'10','ноя':'11','дек':'12',
+            'января':'01','февраля':'02','марта':'03','апреля':'04',
+            'июня':'06','июля':'07','августа':'08','сентября':'09','октября':'10','ноября':'11','декабря':'12'
         };
-        document.body.appendChild(toggle);
-    }
 
-    // ---------- ПАРСИНГ СТРАНИЦЫ ----------
-    function parsePageData() {
-        console.log('[SW] 🕵️ Начинаю парсинг страницы...');
-        const text = document.body.innerText;
-
-        function findValue(label) {
-            const regex = new RegExp(label.replace(/[.+?^${}()|[\]\\]/g, '\\$&') + '\\s[:–-]?\\s*([^\\n]+)', 'i');
-            const match = text.match(regex);
-            return match ? match[1].trim() : '';
-        }
-
-        function cleanFullName(raw) {
-            if (!raw) return '';
-            let cleaned = raw.replace(/done_outline/gi, '').trim();
-            cleaned = cleaned.replace(/\s+/g, ' ').trim();
-            return cleaned;
-        }
-
-        function getShortCompanies() {
-            const accountIndex = text.indexOf('АККАУНТЫ');
-            if (accountIndex === -1) return '';
-            const endMarkers = ['БОНУСНЫЕ КАРТЫ', 'ДОКУМЕНТЫ', 'TRAVEL ПОЛИТИКИ', 'ПРАВА'];
-            let endPos = text.length;
-            for (let marker of endMarkers) {
-                const idx = text.indexOf(marker, accountIndex);
-                if (idx !== -1 && idx < endPos) endPos = idx;
+        // 1. Форматирование даты: "3 авг. 1981 г." -> "3 авг. 1981 г. (03.08.1981)"
+        // (?!\s*\() защищает от повторного форматирования, если скобки уже есть
+        result = result.replace(/(\d{1,2})\s+([а-яё]+)\.?\s+(\d{4})\s*г\.?(?!\s*\()/gi, function(match, day, monthName, year) {
+            let mKey = monthName.toLowerCase();
+            if (mKey.length > 3) mKey = mKey.slice(0, 3);
+            const monthNum = months[mKey] || '00';
+            if (monthNum !== '00') {
+                const dayFormatted = day.padStart(2, '0');
+                return `${match} (${dayFormatted}.${monthNum}.${year})`;
             }
-            const section = text.substring(accountIndex, endPos);
-            if (/Структурная группа/i.test(section)) {
-                return parseStructuredGroups(section);
-            }
-            const startLabel = 'Список коротких компаний:';
-            const startPos = section.indexOf(startLabel);
-            if (startPos === -1) return '';
-            let pos = startPos + startLabel.length;
-            while (pos < section.length && (section[pos] === ' ' || section[pos] === '\n' || section[pos] === '\r')) pos++;
-            const oldEndMarkers = ['Отделы:', 'Структурная группа'];
-            let oldEndPos = section.length;
-            for (let marker of oldEndMarkers) {
-                const idx = section.indexOf(marker, pos);
-                if (idx !== -1 && idx < oldEndPos) oldEndPos = idx;
-            }
-            return section.substring(pos, oldEndPos).trim();
-        }
-
-        function parseStructuredGroups(section) {
-            const parts = section.split(/(?=Структурная группа)/i).map(p => p.trim()).filter(p => p);
-            const results = [];
-            for (let part of parts) {
-                if (!/^Структурная группа/i.test(part)) continue;
-                const lines = part.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '');
-                const groupHeader = lines.find(l => /^Структурная группа/i.test(l)) || '';
-                let shortCompanies = '';
-                const scIdx = lines.findIndex(l => /^Список коротких компаний/i.test(l));
-                if (scIdx !== -1) {
-                    const labelLine = lines[scIdx];
-                    const colonIdx = labelLine.indexOf(':');
-                    if (colonIdx !== -1) {
-                        const afterColon = labelLine.substring(colonIdx + 1).trim();
-                        if (afterColon) {
-                            shortCompanies = afterColon;
-                        } else {
-                            for (let i = scIdx + 1; i < lines.length; i++) {
-                                if (lines[i] && !/^(Отделы|Список коротких|Структурная)/i.test(lines[i])) {
-                                    shortCompanies = lines[i];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                let departments = '';
-                const deptIdx = lines.findIndex(l => /^Отделы/i.test(l));
-                if (deptIdx !== -1) {
-                    const labelLine = lines[deptIdx];
-                    const colonIdx = labelLine.indexOf(':');
-                    if (colonIdx !== -1) {
-                        const afterColon = labelLine.substring(colonIdx + 1).trim();
-                        if (afterColon) {
-                            departments = afterColon;
-                        } else {
-                            for (let i = deptIdx + 1; i < lines.length; i++) {
-                                if (lines[i] && !/^(Отделы|Список коротких|Структурная)/i.test(lines[i])) {
-                                    departments = lines[i];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                let groupText = groupHeader;
-                if (shortCompanies) groupText += '\nСписок коротких компаний: ' + shortCompanies;
-                if (departments) groupText += '\nОтделы: ' + departments;
-                results.push(groupText);
-            }
-            return results.join('\n\n');
-        }
-
-        function getForeignPassports() {
-            const results = [];
-            const markers = ['Загран.паспорт', 'Паспорт иностранного гр-на'];
-            let parts = [];
-            for (let marker of markers) {
-                let pos = text.indexOf(marker);
-                while (pos !== -1) {
-                    parts.push({ marker, start: pos });
-                    pos = text.indexOf(marker, pos + 1);
-                }
-            }
-            parts.sort((a, b) => a.start - b.start);
-            for (let i = 0; i < parts.length; i++) {
-                const start = parts[i].start + parts[i].marker.length;
-                const nextStart = (i + 1 < parts.length) ? parts[i+1].start : text.length;
-                const section = text.substring(start, nextStart);
-                const surnameMatch = section.match(/Фамилия\s*[:–-]?\s*([^\n]+)/i);
-                const nameMatch = section.match(/Имя\s*[:–-]?\s*([^\n]+)/i);
-                const patronymicMatch = section.match(/Отчество\s*[:–-]?\s*([^\n]+)/i);
-                const numberMatch = section.match(/Номер\s*[:–-]?\s*([^\n]+)/i);
-                const expiryMatch = section.match(/Срок действия\s*[:–-]?\s*([^\n]+)/i);
-                results.push({
-                    surname: surnameMatch ? surnameMatch[1].trim() : '',
-                    name: nameMatch ? nameMatch[1].trim() : '',
-                    patronymic: patronymicMatch ? patronymicMatch[1].trim() : '',
-                    number: numberMatch ? numberMatch[1].trim() : '',
-                    expiry: expiryMatch ? expiryMatch[1].trim() : '',
-                    marker: parts[i].marker
-                });
-            }
-            return results;
-        }
-
-        function getPassportRF() {
-            const section = text.split('Паспорт РФ')[1];
-            if (!section) return '';
-            const match = section.match(/Номер\s*[:–-]?\s*([^\n]+)/i);
-            return match ? match[1].trim() : '';
-        }
-
-        // --- ФОРМАТИРОВАНИЕ ДАТЫ С ЛОГАМИ ---
-        function formatDate(raw) {
-            console.log('[SW] 📅 formatDate получила сырые данные:', raw);
-            if (!raw) return '';
-            if (/^\d{2}.\d{2}.\d{4}$/.test(raw.trim())) {
-                console.log('[SW] 📅 Дата уже в формате ДД.ММ.ГГГГ');
-                return raw.trim();
-            }
-            const months = {
-                'янв':'01','фев':'02','мар':'03','апр':'04','мая':'05','май':'05',
-                'июн':'06','июл':'07','авг':'08','сен':'09','окт':'10','ноя':'11','дек':'12',
-                'января':'01','февраля':'02','марта':'03','апреля':'04',
-                'июня':'06','июля':'07','августа':'08','сентября':'09','октября':'10','ноября':'11','декабря':'12'
-            };
-            const match = raw.match(/(\d+)\s*([а-яё]+).?\s*(\d{4})\s*г?.?/i);
-            if (!match) {
-                console.log('[SW] 📅 Регулярное выражение не совпало с датой');
-                return '';
-            }
-            const day = match[1].padStart(2, '0');
-            const monthKey = match[2].toLowerCase();
-            const month = months[monthKey] || months[monthKey.slice(0,3)] || '00';
-            if (month === '00') {
-                console.log('[SW] 📅 Не удалось определить месяц:', monthKey);
-                return '';
-            }
-            const year = match[3];
-            const result = `${day}.${month}.${year}`;
-            console.log('[SW] 📅 Отформатированная дата:', result);
-            return result;
-        }
-
-        // --- ФОРМАТИРОВАНИЕ ПАСПОРТА С ЛОГАМИ ---
-        function formatPassportRF(raw) {
-            console.log('[SW] 🛂 formatPassportRF получила сырые данные:', raw);
-            if (!raw) return '';
-            const digits = raw.replace(/\D/g, ''); // Оставляем только цифры
-            console.log('[SW] 🛂 Только цифры:', digits, 'Длина:', digits.length);
-            if (digits.length === 10) {
-                const series = digits.substring(0, 4);
-                const number = digits.substring(4, 10);
-                const result = `${digits} (${series} ${number})`;
-                console.log('[SW] 🛂 Успешно отформатировано:', result);
-                return result;
-            }
-            console.log('[SW] 🛂 Длина не равна 10, возвращаем как есть');
-            return raw;
-        }
-
-        const fullNameRaw = findValue('ФИО');
-        const fullName = cleanFullName(fullNameRaw);
-        const birthDateRaw = findValue('Дата рождения');
-        const citizenship = findValue('Гражданство');
-        const phone = findValue('Телефон');
-        const email = findValue('Email') || findValue('Email:');
-        const costCenter = findValue('Центр затрат по умолчанию');
-        const shortCompanies = getShortCompanies();
-        
-        const formattedDate = formatDate(birthDateRaw);
-        const dateString = (birthDateRaw && formattedDate) ? birthDateRaw + ' (' + formattedDate + ')' : birthDateRaw || '';
-        
-        const passportRFRaw = getPassportRF();
-        const passportRF = formatPassportRF(passportRFRaw);
-        
-        const foreignPassports = getForeignPassports();
-        const isRussian = citizenship.toLowerCase().includes('россия') || citizenship.toLowerCase().includes('russia');
-
-        console.log('[SW] ✅ Итоговые данные для карточки:', { fullName, dateString, passportRF });
-
-        return {
-            link: window.location.href,
-            fullName, dateString, phone, citizenship, email, costCenter, shortCompanies,
-            passportRF, foreignPassports, isRussian
-        };
-    }
-
-    // ---------- СОЗДАНИЕ ПАНЕЛИ ----------
-    function createPanel() {
-        const existing = document.getElementById('smartway-panel');
-        if (existing) {
-            existing.style.display = 'block';
-            return;
-        }
-        const panel = document.createElement('div');
-        panel.id = 'smartway-panel';
-        panel.style.cssText = `position: fixed; top: 80px; right: 20px; z-index: 999999; width: 380px; max-height: 70vh; background: white; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.2); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #e0e0e0;`;
-
-        const header = document.createElement('div');
-        header.style.cssText = `background: #4CAF50; color: white; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: move; user-select: none;`;
-        header.innerHTML = `<span style="font-weight: bold; font-size: 16px;">📋 Карточка сотрудника</span> <button id="smartway-close" style="background: none; border: none; color: white; font-size: 20px; cursor: pointer;">✕</button>`;
-        panel.appendChild(header);
-
-        const typeSelector = document.createElement('div');
-        typeSelector.style.cssText = `display: flex; gap: 6px; padding: 10px 12px; background: #f9f9f9; border-bottom: 1px solid #eee; flex-wrap: wrap;`;
-        const types = [
-            { id: 'standard', label: '📋 Стандартная' },
-            { id: 'rail', label: '🚄 ЖД' },
-            { id: 'insurance', label: '🛡️ Страховка' }
-        ];
-        types.forEach(t => {
-            const btn = document.createElement('button');
-            btn.dataset.type = t.id;
-            btn.textContent = t.label;
-            btn.style.cssText = `background: white; border: 1px solid #ccc; border-radius: 20px; padding: 4px 12px; font-size: 13px; cursor: pointer; transition: 0.2s; flex: 1; white-space: nowrap;`;
-            btn.onmouseover = () => { btn.style.background = '#e8f5e9'; };
-            btn.onmouseout = () => { btn.style.background = 'white'; };
-            btn.onclick = () => {
-                document.querySelectorAll('#smartway-panel .type-btn').forEach(b => b.style.background = 'white');
-                btn.style.background = '#c8e6c9';
-                generateCard(t.id);
-            };
-            btn.className = 'type-btn';
-            typeSelector.appendChild(btn);
+            return match;
         });
-        panel.appendChild(typeSelector);
 
-        const contentArea = document.createElement('div');
-        contentArea.id = 'smartway-content';
-        contentArea.style.cssText = `padding: 12px 16px; overflow-y: auto; flex: 1; background: #fafafa; min-height: 100px; max-height: 40vh; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-family: 'Courier New', monospace;`;
-        contentArea.textContent = 'Выберите тип карточки';
-        panel.appendChild(contentArea);
+        // 2. Форматирование паспорта: "1226129892" -> "1226129892 (1226 129892)"
+        // \b ищет ровно 10 цифр, (?!\s*\() защищает от повторного форматирования
+        result = result.replace(/\b(\d{10})\b(?!\s*\()/g, function(match, digits) {
+            const series = digits.slice(0, 4);
+            const number = digits.slice(4);
+            return `${digits} (${series} ${number})`;
+        });
 
-        const copyBtn = document.createElement('button');
-        copyBtn.id = 'smartway-copy';
-        copyBtn.textContent = '📋 Копировать';
-        copyBtn.style.cssText = `margin: 8px 16px 16px 16px; padding: 8px 0; background: #4CAF50; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: 0.2s; font-weight: bold;`;
-        copyBtn.onmouseover = () => { copyBtn.style.background = '#45a049'; };
-        copyBtn.onmouseout = () => { copyBtn.style.background = '#4CAF50'; };
-        copyBtn.onclick = () => {
-            if (!lastCardText || lastCardText === 'Выберите тип карточки' || lastCardText === '⏳ Загрузка...') {
-                return;
-            }
+        return result;
+    }
+
+    // ===== УВЕДОМЛЕНИЕ =====
+    function showNotification(icon, message, duration = 2000) {
+        const existing = document.getElementById('quick-copy-notification');
+        if (existing) existing.remove();
+        const notif = document.createElement('div');
+        notif.id = 'quick-copy-notification';
+        notif.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483647;background:#10b981;color:#fff;padding:14px 20px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.15);font-family:system-ui,-apple-system,sans-serif;font-size:14px;display:flex;align-items:center;gap:10px;animation:slideIn 0.3s ease;max-width:400px;';
+        const style = document.createElement('style');
+        style.textContent = '@keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }';
+        document.head.appendChild(style);
+        notif.innerHTML = `<span style="font-size:20px;">${icon}</span><span>${escapeHtml(message)}</span>`;
+        document.body.appendChild(notif);
+        setTimeout(() => {
+            notif.style.transition = 'opacity 0.3s';
+            notif.style.opacity = '0';
+            setTimeout(() => notif.remove(), 300);
+        }, duration);
+    }
+
+    function showError(message) {
+        const existing = document.getElementById('quick-copy-notification');
+        if (existing) existing.remove();
+        const notif = document.createElement('div');
+        notif.id = 'quick-copy-notification';
+        notif.style.cssText = 'position:fixed;top:20px;right:20px;z-index:2147483647;background:#ef4444;color:#fff;padding:14px 20px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,0.15);font-family:system-ui,-apple-system,sans-serif;font-size:14px;display:flex;align-items:center;gap:10px;animation:slideIn 0.3s ease;max-width:400px;';
+        const style = document.createElement('style');
+        style.textContent = '@keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }';
+        document.head.appendChild(style);
+        notif.innerHTML = `<span style="font-size:20px;">\u26A0\uFE0F</span><span>${escapeHtml(message)}</span>`;
+        document.body.appendChild(notif);
+        setTimeout(() => {
+            notif.style.transition = 'opacity 0.3s';
+            notif.style.opacity = '0';
+            setTimeout(() => notif.remove(), 300);
+        }, 3000);
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function copyToClipboard(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+        return new Promise((resolve, reject) => {
             const ta = document.createElement('textarea');
-            ta.value = lastCardText;
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            ta.style.top = '-9999px';
+            ta.value = text;
+            ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
             document.body.appendChild(ta);
             ta.select();
-            try {
-                document.execCommand('copy');
-                copyBtn.textContent = '✅ Скопировано!';
-                setTimeout(() => { copyBtn.textContent = '📋 Копировать'; }, 1500);
-            } catch (err) {
-                navigator.clipboard.writeText(lastCardText).then(() => {
-                    copyBtn.textContent = '✅ Скопировано!';
-                    setTimeout(() => { copyBtn.textContent = '📋 Копировать'; }, 1500);
-                }).catch(() => {
-                    alert('Не удалось скопировать текст. Попробуйте вручную.');
-                });
-            }
+            try { document.execCommand('copy'); resolve(); } catch (err) { reject(err); }
             ta.remove();
-        };
-        panel.appendChild(copyBtn);
+        });
+    }
 
-        header.querySelector('#smartway-close').onclick = () => {
-            panel.style.display = 'none';
+    function getHistory() {
+        try { return JSON.parse(GM_getValue(HISTORY_KEY, '[]')); } catch (e) { return []; }
+    }
+
+    function saveToHistory(text) {
+        const history = getHistory();
+        history.unshift({ text, timestamp: Date.now(), length: text.length, preview: text.substring(0, 100) });
+        if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+        GM_setValue(HISTORY_KEY, JSON.stringify(history));
+    }
+
+    // ===== СВЕТЛЫЙ ПОСТОЯННЫЙ ВИДЖЕТ "БУФЕР ОБМЕНА" =====
+    function updateFloatingWidget(text, isVisible) {
+        const widgetRoot = document.getElementById('quick-copy-widget-root');
+        if (!text || isVisible === false) { if (widgetRoot) widgetRoot.remove(); return; }
+        if (widgetRoot) {
+            const textElement = widgetRoot.shadowRoot.getElementById('widget-text');
+            if (textElement) textElement.textContent = text;
+            return;
+        }
+
+        const root = document.createElement('div');
+        root.id = 'quick-copy-widget-root';
+        document.body.appendChild(root);
+        const shadow = root.attachShadow({ mode: 'open' });
+
+        const style = document.createElement('style');
+        style.textContent = `.info-card{position:fixed;bottom:20px;right:20px;width:380px;background:#ffffff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.08);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;border:1px solid #e5e7eb;overflow:hidden;z-index:2147483647;}.header{background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);color:#ffffff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;}.header-title{font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;letter-spacing:0.3px;}.header-actions{display:flex;gap:6px;align-items:center;}.icon-btn{background:rgba(255,255,255,0.2);border:none;color:#ffffff;width:28px;height:28px;border-radius:6px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;}.icon-btn:hover{background:rgba(255,255,255,0.3);}.content{background:#f9fafb;padding:16px 18px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;font-size:13px;color:#1f2937;line-height:1.6;font-family:"SF Mono","Monaco","Consolas",monospace;border-top:1px solid #e5e7eb;}.footer{background:#ffffff;padding:10px 18px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#6b7280;}.footer-hint{display:flex;align-items:center;gap:4px;}.kbd{background:#f3f4f6;border:1px solid #d1d5db;border-radius:4px;padding:2px 6px;font-size:10px;font-family:system-ui,sans-serif;color:#374151;}.close{cursor:pointer;opacity:0.9;font-size:16px;}.close:hover{opacity:1;}`;
+
+        const container = document.createElement('div');
+        container.className = 'info-card';
+        container.innerHTML = `<div class="header" id="widget-header"><div class="header-title">${ICON_COPY} Буфер обмена</div><div class="header-actions"><button class="icon-btn" id="copy-widget-btn" title="Копировать">${ICON_COPY}</button><button class="icon-btn" id="history-widget-btn" title="История">${ICON_HISTORY}</button><button class="icon-btn close" id="close-widget" title="Закрыть">${ICON_CLOSE}</button></div></div><div class="content" id="widget-text"></div><div class="footer"><div class="footer-hint"><span class="kbd">Alt</span>+<span class="kbd">C</span> сохранить</div><div class="footer-hint"><span class="kbd">Alt</span>+<span class="kbd">V</span> история</div></div>`;
+
+        shadow.appendChild(style);
+        shadow.appendChild(container);
+
+        shadow.getElementById('close-widget').onclick = () => GM_setValue(WIDGET_VISIBLE_KEY, false);
+        shadow.getElementById('copy-widget-btn').onclick = () => {
+            const textEl = shadow.getElementById('widget-text');
+            if (textEl && textEl.textContent) {
+                copyToClipboard(textEl.textContent).then(() => showNotification(ICON_CHECK, 'Скопировано из буфера'));
+            }
+        };
+        shadow.getElementById('history-widget-btn').onclick = () => showHistoryPanel();
+
+        const header = shadow.getElementById('widget-header');
+        let isDragging = false, offsetX = 0, offsetY = 0;
+        header.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            const rect = root.getBoundingClientRect();
+            offsetX = e.clientX - rect.left;
+            offsetY = e.clientY - rect.top;
+            root.style.cursor = 'grabbing';
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const left = Math.max(10, Math.min(window.innerWidth - root.offsetWidth - 10, e.clientX - offsetX));
+            const top = Math.max(10, Math.min(window.innerHeight - root.offsetHeight - 10, e.clientY - offsetY));
+            root.style.position = 'fixed';
+            root.style.left = left + 'px';
+            root.style.top = top + 'px';
+            root.style.bottom = 'auto';
+            root.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; root.style.cursor = 'default'; } });
+
+        shadow.getElementById('widget-text').textContent = text;
+    }
+
+    function showHistoryPanel() {
+        const existing = document.getElementById('quick-copy-history-panel');
+        if (existing) { existing.remove(); return; }
+
+        const history = getHistory();
+        const panel = document.createElement('div');
+        panel.id = 'quick-copy-history-panel';
+        panel.style.cssText = 'position:fixed;top:80px;right:20px;z-index:2147483647;width:420px;max-height:70vh;background:#ffffff;border-radius:16px;box-shadow:0 10px 40px rgba(0,0,0,0.15);font-family:system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;overflow:hidden;border:1px solid #e5e7eb;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;';
+        header.innerHTML = `<span style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;">${ICON_HISTORY} История (${history.length})</span><button id="qc-history-close" style="background:rgba(255,255,255,0.2);border:none;color:#fff;width:28px;height:28px;border-radius:6px;cursor:pointer;font-size:16px;">${ICON_CLOSE}</button>`;
+        panel.appendChild(header);
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;padding:10px 14px;background:#f9fafb;border-bottom:1px solid #e5e7eb;';
+        actions.innerHTML = `<button id="qc-clear-history" style="flex:1;padding:8px;background:#ef4444;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:background 0.15s;">${ICON_TRASH} Очистить</button>`;
+        panel.appendChild(actions);
+
+        const content = document.createElement('div');
+        content.style.cssText = 'padding:12px 14px;overflow-y:auto;flex:1;max-height:50vh;background:#fafafa;';
+
+        if (history.length === 0) {
+            content.innerHTML = '<div style="text-align:center;color:#9ca3af;padding:30px 10px;font-size:14px;">📭 История пуста.<br>Выделите текст и нажмите Alt+C</div>';
+        } else {
+            history.forEach((item) => {
+                const entry = document.createElement('div');
+                entry.style.cssText = 'background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:all 0.15s;';
+                entry.onmouseover = () => { entry.style.borderColor = '#3b82f6'; entry.style.background = '#eff6ff'; };
+                entry.onmouseout = () => { entry.style.borderColor = '#e5e7eb'; entry.style.background = '#ffffff'; };
+
+                const time = new Date(item.timestamp);
+                const timeStr = time.toLocaleDateString('ru-RU') + ' ' + time.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+                const preview = item.preview + (item.text.length > 100 ? '...' : '');
+
+                entry.innerHTML = `<div style="font-size:11px;color:#6b7280;margin-bottom:4px;display:flex;justify-content:space-between;"><span>${timeStr}</span><span>${item.length} симв.</span></div><div style="font-size:13px;color:#1f2937;white-space:pre-wrap;word-break:break-word;line-height:1.4;">${escapeHtml(preview)}</div><div style="font-size:11px;color:#3b82f6;margin-top:6px;font-weight:600;">${ICON_COPY} Нажмите, чтобы активировать</div>`;
+
+                entry.onclick = () => {
+                    GM_setValue(REFERENCE_KEY, item.text);
+                    GM_setValue(WIDGET_VISIBLE_KEY, true);
+                    updateFloatingWidget(item.text, true);
+                    showNotification(ICON_CHECK, 'Запись из истории активирована');
+                };
+                content.appendChild(entry);
+            });
+        }
+
+        panel.appendChild(content);
+        document.body.appendChild(panel);
+
+        header.querySelector('#qc-history-close').onclick = () => panel.remove();
+        actions.querySelector('#qc-clear-history').onclick = () => {
+            GM_setValue(HISTORY_KEY, '[]');
+            showNotification(ICON_TRASH, 'История очищена');
+            panel.remove();
         };
 
-        let isDragging = false;
-        let offsetX, offsetY;
+        let isDragging = false, offsetX = 0, offsetY = 0;
         header.addEventListener('mousedown', (e) => {
             isDragging = true;
             const rect = panel.getBoundingClientRect();
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
-            panel.style.cursor = 'grabbing';
         });
         document.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
-            let left = e.clientX - offsetX;
-            let top = e.clientY - offsetY;
-            left = Math.max(10, Math.min(window.innerWidth - panel.offsetWidth - 10, left));
-            top = Math.max(10, Math.min(window.innerHeight - panel.offsetHeight - 10, top));
+            const left = Math.max(10, Math.min(window.innerWidth - panel.offsetWidth - 10, e.clientX - offsetX));
+            const top = Math.max(10, Math.min(window.innerHeight - panel.offsetHeight - 10, e.clientY - offsetY));
             panel.style.left = left + 'px';
             panel.style.top = top + 'px';
             panel.style.right = 'auto';
         });
-        document.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                panel.style.cursor = 'default';
-            }
-        });
-
-        document.body.appendChild(panel);
-        if (!cachedData) {
-            cachedData = parsePageData();
-        }
+        document.addEventListener('mouseup', () => { isDragging = false; });
     }
 
-    // ---------- ГЕНЕРАЦИЯ КАРТОЧКИ ----------
-    function generateCard(type) {
-        const contentArea = document.getElementById('smartway-content');
-        if (!contentArea) return;
-        if (!cachedData) {
-            cachedData = parsePageData();
-        }
-        const data = cachedData;
-        if (!data) {
-            contentArea.textContent = '❌ Не удалось извлечь данные';
-            lastCardText = '';
+    // ===== ГЛАВНАЯ ФУНКЦИЯ: Alt+C С АВТОФОРМАТИРОВАНИЕМ =====
+    function doQuickCopy() {
+        const selection = window.getSelection().toString().trim();
+        if (!selection) {
+            showError('Сначала выделите текст');
             return;
         }
-        contentArea.textContent = '⏳ Загрузка...';
-        lastCardText = '';
-        setTimeout(() => {
-            let cardText = '';
-            const { link, fullName, dateString, phone, citizenship, email, costCenter, shortCompanies,
-                passportRF, foreignPassports, isRussian } = data;
 
-            function formatPassports(passports) {
-                if (!passports || passports.length === 0) return '';
-                let result = '';
-                passports.forEach((p, index) => {
-                    if (index > 0) result += '\n---\n';
-                    result += p.marker + ':\n';
-                    result += p.surname + '\n' + p.name;
-                    if (p.patronymic) result += '\n' + p.patronymic;
-                    result += '\n' + p.number + '\n' + p.expiry;
-                });
-                return result;
-            }
+        // Применяем автоформатирование (дата и паспорт)
+        const formattedSelection = formatCopiedText(selection);
 
-            if (type === 'standard') {
-                if (isRussian) {
-                    cardText = `${link}\n\n${fullName}\n${dateString}\n${phone}\n${passportRF}\n\n${shortCompanies}`;
-                    if (costCenter) cardText += `\n\nЦЗ: **${costCenter}**`;
-                } else {
-                    let foreignPart = '';
-                    if (foreignPassports.length > 0) {
-                        foreignPart = '\n\n' + formatPassports(foreignPassports);
-                    } else {
-                        foreignPart = '\n\nПаспорт иностранного гр-на не найден';
-                    }
-                    cardText = `${link}\n\n${fullName}\n${dateString}\n${phone}\n\n${citizenship}${foreignPart}\n\n${shortCompanies}`;
-                    if (costCenter) cardText += `\n\nЦЗ: **${costCenter}**`;
-                }
-            } else if (type === 'rail') {
-                let foreignPart = '';
-                if (foreignPassports.length > 0) {
-                    foreignPart = '\n\n' + formatPassports(foreignPassports);
-                } else {
-                    foreignPart = '\n\nЗагран.паспорт не найден';
-                }
-                cardText = `${link}\n\n${fullName}\n${dateString}\n${phone}`;
-                if (!isRussian) {
-                    cardText += `\n\n${citizenship}`;
-                }
-                cardText += foreignPart + `\n\n${shortCompanies}`;
-                if (costCenter) cardText += `\n\nЦЗ: **${costCenter}**`;
-            } else if (type === 'insurance') {
-                let foreignPart = '';
-                if (foreignPassports.length > 0) {
-                    foreignPart = '\n\n' + formatPassports(foreignPassports);
-                } else {
-                    foreignPart = '\n\nЗагран.паспорт не найден';
-                }
-                cardText = `${link}\n\n${fullName}\n${dateString}\n${phone}`;
-                if (isRussian) {
-                    cardText += `\n${passportRF}`;
-                } else {
-                    cardText += `\n\n${citizenship}`;
-                }
-                cardText += `\n\nEmail: ${email}` + foreignPart + `\n\n${shortCompanies}`;
-                if (costCenter) cardText += `\n\nЦЗ: **${costCenter}**`;
-            }
+        GM_setValue(REFERENCE_KEY, formattedSelection);
+        GM_setValue(WIDGET_VISIBLE_KEY, true);
+        saveToHistory(formattedSelection); // В историю тоже сохраняется уже отформатированный текст
+        updateFloatingWidget(formattedSelection, true);
 
-            lastCardText = cardText;
-            contentArea.textContent = cardText;
-            console.log('📋 Текст для копирования сохранён, длина:', lastCardText.length);
-        }, 50);
+        showNotification(ICON_CHECK, 'Сохранено: ' + formattedSelection.substring(0, 60) + (formattedSelection.length > 60 ? '...' : ''));
+        console.log('[Буфер обмена] Сохранено и отформатировано');
     }
 
-    // ---------- ОТКРЫТИЕ ПО КЛАВИШАМ ----------
-    function openPanelAndGenerate(type) {
-        let panel = document.getElementById('smartway-panel');
-        if (!panel) {
-            createPanel();
-            panel = document.getElementById('smartway-panel');
-        } else {
-            panel.style.display = 'block';
-        }
-        if (!cachedData) {
-            cachedData = parsePageData();
-        }
-        const btn = document.querySelector(`#smartway-panel .type-btn[data-type="${type}"]`);
-        if (btn) btn.click();
-    }
+    // ===== ИНИЦИАЛИЗАЦИЯ =====
+    const savedData = GM_getValue(REFERENCE_KEY, '');
+    const savedVisible = GM_getValue(WIDGET_VISIBLE_KEY, true);
+    if (savedData && savedVisible) updateFloatingWidget(savedData, true);
 
-    // ---------- ГОРЯЧИЕ КЛАВИШИ ----------
-    function hotkeyHandler(e) {
-        if (e.ctrlKey && !e.altKey && !e.shiftKey) {
-            const key = e.key;
-            if (key === '1') {
-                e.preventDefault();
-                e.stopPropagation();
-                openPanelAndGenerate('standard');
-                return;
-            }
-            if (key === '2') {
-                e.preventDefault();
-                e.stopPropagation();
-                openPanelAndGenerate('rail');
-                return;
-            }
-            if (key === '3') {
-                e.preventDefault();
-                e.stopPropagation();
-                openPanelAndGenerate('insurance');
-                return;
-            }
-        }
-    }
-
-    function setupHotkeys() {
-        window.removeEventListener('keydown', hotkeyHandler);
-        document.removeEventListener('keydown', hotkeyHandler);
-        window.addEventListener('keydown', hotkeyHandler, true);
-        document.addEventListener('keydown', hotkeyHandler, true);
-    }
-
-    // ---------- ИНИЦИАЛИЗАЦИЯ ----------
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            createToggleButton();
-            setupHotkeys();
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(REFERENCE_KEY, (name, old_value, new_value) => {
+            updateFloatingWidget(new_value, GM_getValue(WIDGET_VISIBLE_KEY, true));
         });
-    } else {
-        createToggleButton();
-        setupHotkeys();
+        GM_addValueChangeListener(WIDGET_VISIBLE_KEY, (name, old_value, new_value) => {
+            const data = GM_getValue(REFERENCE_KEY, '');
+            if (data) updateFloatingWidget(data, new_value);
+        });
     }
 
+    document.addEventListener('keydown', (e) => {
+        if (e.altKey && e.code === 'KeyC') { e.preventDefault(); e.stopPropagation(); doQuickCopy(); return; }
+        if (e.altKey && e.code === 'KeyV') { e.preventDefault(); e.stopPropagation(); showHistoryPanel(); return; }
+        if (e.key === 'Escape') {
+            const panel = document.getElementById('quick-copy-history-panel');
+            if (panel) panel.remove();
+        }
+    }, true);
+
+    console.log('[Буфер обмена v3.1] Загружен. Горячие клавиши: Alt+C (сохранить), Alt+V (история)');
 })();
